@@ -4,7 +4,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants.dart';
 
-/// Persists lightweight app settings (last dir, quality label)
 class SettingsRepository {
   Future<String?> getLastTargetDir() async {
     final prefs = await SharedPreferences.getInstance();
@@ -29,8 +28,6 @@ class SettingsRepository {
     await prefs.setString(PrefKeys.audioQualityLabel, label);
   }
 
-  /// Try to locate yt-dlp.exe:
-  /// 1) Hardcoded path, 2) PATH, 3) CWD
   String? findYtDlpExe({String hardcoded = Defaults.hardcodedYtDlp}) {
     if (File(hardcoded).existsSync()) return hardcoded;
 
@@ -56,5 +53,17 @@ class SettingsRepository {
     } catch (_) {
       return false;
     }
+  }
+
+  // --- New: persist last FFmpeg update date (ISO string) ---
+
+  Future<void> setFfmpegUpdatedAt(String iso) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(PrefKeys.ffmpegUpdatedAt, iso);
+  }
+
+  Future<String?> getFfmpegUpdatedAt() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(PrefKeys.ffmpegUpdatedAt);
   }
 }

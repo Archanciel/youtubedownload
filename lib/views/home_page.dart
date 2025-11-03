@@ -107,17 +107,6 @@ class HomePage extends StatelessWidget {
               children: [
                 Text('yt-dlp version: ${settings.ytDlpVersion ?? 'unknown'}'),
                 const SizedBox(width: 12),
-                OutlinedButton.icon(
-                  onPressed:
-                      (dl.busy ||
-                          settings.updatingYtDlp ||
-                          settings.ytDlpPath == null)
-                      ? null
-                      : () => settings.checkYtDlpVersion(),
-                  icon: const Icon(Icons.info_outline),
-                  label: const Text('Check'),
-                ),
-                const SizedBox(width: 8),
                 FilledButton.icon(
                   onPressed:
                       (dl.busy ||
@@ -150,13 +139,12 @@ class HomePage extends StatelessWidget {
             const SizedBox(height: 8),
             Row(
               children: [
-                Text('FFmpeg updated on: ${settings.ffmpegUpdateDate ?? 'unknown'}'),
+                Text(
+                  'FFmpeg updated on: ${settings.ffmpegUpdateDate ?? 'unknown'}',
+                ),
                 const SizedBox(width: 8),
                 FilledButton.icon(
-                  onPressed:
-                      (dl.busy ||
-                          settings.updatingYtDlp ||
-                          settings.ytDlpPath == null)
+                  onPressed: (dl.busy || settings.updatingFfmpeg)
                       ? null
                       : () async {
                           final okFF = await settings.updateFfmpeg();
@@ -170,7 +158,7 @@ class HomePage extends StatelessWidget {
                           );
                           ScaffoldMessenger.of(context).showSnackBar(snack);
                         },
-                  icon: settings.updatingYtDlp
+                  icon: settings.updatingFfmpeg
                       ? const SizedBox(
                           width: 16,
                           height: 16,
@@ -187,6 +175,16 @@ class HomePage extends StatelessWidget {
                 alignment: Alignment.centerLeft,
                 child: Text(
                   settings.lastUpdateLog!,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
+            ],
+            if (settings.ffmpegUpdateLog != null) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  settings.ffmpegUpdateLog!,
                   style: const TextStyle(fontSize: 12, color: Colors.black54),
                 ),
               ),
@@ -212,7 +210,15 @@ class HomePage extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: dl.busy
                       ? null
-                      : settings.refreshBinaryAvailability,
+                      : () async {
+                          await settings.refreshBinaryAvailability();
+                          final snack = SnackBar(
+                            content: Text('Tools information refreshed.'),
+                          );
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(snack);
+                          }
+                        },
                   icon: const Icon(Icons.refresh),
                   label: const Text('Refresh binaries'),
                 ),

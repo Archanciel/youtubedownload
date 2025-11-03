@@ -1,42 +1,67 @@
 import 'dart:io';
 import 'package:http/http.dart' as http;
-import 'package:archive/archive_io.dart';
+import 'package:archive/archive.dart';
 
+/// Downloads and updates ffmpeg.exe in a writable directory on Windows.
+/// Default source: gyan.dev "release essentials" build (stable).
 class FfmpegService {
+  /// Where ffmpeg.exe should finally live, e.g. "C:\\YtDlp"
   final String targetDir;
 
-  FfmpegService(this.targetDir);
+  /// Optional override for the download URL (stable release).
+  final String zipUrl;
 
-  Future<String> updateFfmpeg() async {
-    const url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
-    final tmpZip = File('$targetDir/ffmpeg_temp.zip');
+  FfmpegService({
+    required this.targetDir,
+    this.zipUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
+  });
 
-    // 1. Download the ZIP
-    final resp = await http.get(Uri.parse(url));
-    if (resp.statusCode != 200) {
-      throw 'Failed to download FFmpeg (HTTP ${resp.statusCode})';
-    }
-    await tmpZip.writeAsBytes(resp.bodyBytes);
-
-    // 2. Decode the archive
-    final bytes = await tmpZip.readAsBytes();
-    final archive = ZipDecoder().decodeBytes(bytes);
-
-    // 3. Extract only ffmpeg.exe
-    String? extracted;
-    for (final file in archive) {
-      if (file.isFile && file.name.endsWith('ffmpeg.exe')) {
-        final outPath = '$targetDir/ffmpeg.exe';
-        final outFile = File(outPath)..createSync(recursive: true);
-        outFile.writeAsBytesSync(file.content as List<int>);
-        extracted = outPath;
-        break;
+  /// Downloads ZIP, extracts ffmpeg.exe, overwrites targetDir\\ffmpeg.exe.
+  /// Returns the absolute path to the updated ffmpeg.exe.
+  ///
+  /// Throws a String on failure with a human-readable message.
+  Future<String> updateFfmpeg({void Function(String msg)? onLog}) async {
+    onLog?.call('Downloading latest FFmpeg ZIP…');
+    final tmpZip = File('$targetDir\\ffmpeg_temp.zip');
+    try {
+      final resp = await http.get(Uri.parse(zipUrl));
+      if (resp.statusCode != 200) {
+        throw 'Failed to download FFmpeg (HTTP ${resp.statusCode}).';
       }
+      await tmpZip.create(recursive: true);
+      await tmpZip.writeAsBytes(resp.bodyBytes);
+
+      onLog?.call('Unpacking ZIP…');
+      final archive = ZipDecoder().decodeBytes(await tmpZip.readAsBytes());
+
+      String? extractedPath;
+      for (final file in archive) {
+        if (!file.isFile) continue;
+        // Most builds contain ffmpeg.exe under "ffmpeg-*/bin/ffmpeg.exe"
+        if (file.name.toLowerCase().endsWith('bin/ffmpeg.exe') ||
+            file.name.toLowerCase().endsWith('bin\\ffmpeg.exe') ||
+            file.name.toLowerCase().endsWith('ffmpeg.exe')) {
+          final outPath = '$targetDir\\ffmpeg.exe';
+          final outFile = File(outPath)..createSync(recursive: true);
+          outFile.writeAsBytesSync(file.content as List<int>);
+          extractedPath = outPath;
+          break;
+        }
+      }
+
+      if (extractedPath == null) {
+        throw 'ffmpeg.exe not found in ZIP archive.';
+      }
+
+      onLog?.call('FFmpeg updated: $extractedPath');
+      return extractedPath;
+    } on SocketException {
+      throw 'Network error while downloading FFmpeg.';
+    } on FileSystemException catch (e) {
+      throw 'File system error: ${e.message}';
+    } finally {
+      // Best-effort cleanup
+      try { if (await tmpZip.exists()) await tmpZip.delete(); } catch (_) {}
     }
-
-    await tmpZip.delete();
-
-    if (extracted == null) throw 'ffmpeg.exe not found in ZIP archive';
-    return extracted;
   }
 }

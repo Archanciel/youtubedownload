@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -5,12 +6,10 @@ import 'package:intl/intl.dart';
 import '../constants.dart';
 import '../data/settings_repository.dart';
 import '../domain/audio_quality.dart';
-import '../services/ffmpeg_service.dart';
 import '../services/yt_dlp_service.dart';
+import '../services/ffmpeg_service.dart';
 
-/// Holds app-wide settings/state: target directory, audio quality, binaries.
 class SettingsVM extends ChangeNotifier {
-  final FfmpegService _ffmpegService = FfmpegService('c:\\YtDlp');
   late SettingsRepository _repo;
   late YtDlpService _service;
 
@@ -27,10 +26,7 @@ class SettingsVM extends ChangeNotifier {
   bool _ffmpegAvailable = false;
   bool get ffmpegAvailable => _ffmpegAvailable;
 
-  String? _ffmpegUpdateDate;
-  String? get ffmpegUpdateDate => _ffmpegUpdateDate;
-
-  // --- New: yt-dlp version + update state
+  // yt-dlp diagnostics
   String? _ytDlpVersion;
   String? get ytDlpVersion => _ytDlpVersion;
 
@@ -40,8 +36,15 @@ class SettingsVM extends ChangeNotifier {
   String? _lastUpdateLog;
   String? get lastUpdateLog => _lastUpdateLog;
 
-  String? _lastFfmpegLog;
-  String? get lastFfmpegLog => _lastFfmpegLog;
+  // --- FFmpeg update state ---
+  bool _updatingFfmpeg = false;
+  bool get updatingFfmpeg => _updatingFfmpeg;
+
+  String? _ffmpegUpdateDate; // ISO 8601 string persisted
+  String? get ffmpegUpdateDate => _ffmpegUpdateDate;
+
+  String? _ffmpegUpdateLog;
+  String? get ffmpegUpdateLog => _ffmpegUpdateLog;
 
   void attach(SettingsRepository repo, YtDlpService service) {
     _repo = repo;
@@ -54,6 +57,7 @@ class SettingsVM extends ChangeNotifier {
     _qualityLabel = await _repo.getQualityLabel();
     _ytDlpPath = _repo.findYtDlpExe();
     _ffmpegAvailable = await _repo.isFfmpegAvailable();
+    _ffmpegUpdateDate = await _repo.getFfmpegUpdatedAt();
     await _updateVersionCached();
     notifyListeners();
   }
@@ -83,8 +87,7 @@ class SettingsVM extends ChangeNotifier {
     notifyListeners();
   }
 
-  // --- New: version & update ---
-
+  // ---- yt-dlp ----
   Future<void> _updateVersionCached() async {
     if (_ytDlpPath == null) {
       _ytDlpVersion = null;
@@ -97,14 +100,11 @@ class SettingsVM extends ChangeNotifier {
     }
   }
 
-  /// Checks yt-dlp version and updates the property.
   Future<void> checkYtDlpVersion() async {
     await _updateVersionCached();
     notifyListeners();
   }
 
-  /// Runs yt-dlp self-update (-U), then refreshes version info.
-  /// Returns true if the update succeeded (or already up to date).
   Future<bool> updateYtDlp() async {
     if (_ytDlpPath == null) {
       _lastUpdateLog = 'yt-dlp not found (c:\\YtDlp, PATH, or working dir).';
@@ -119,18 +119,9 @@ class SettingsVM extends ChangeNotifier {
     try {
       final (code, log) = await _service.selfUpdate(_ytDlpPath!);
       _lastUpdateLog = log.trim();
-
-      // Common cases:
-      // - If in a protected directory, self-update may fail (access denied).
-      // - If already up to date, output contains such note.
-      // We don't try to parse exact strings; we just display the log.
-
       await _updateVersionCached();
       _updatingYtDlp = false;
       notifyListeners();
-
-      // Consider code==0 a success. code==1 is often "already up to date",
-      // but treat it as success for UX.
       return code == 0 || code == 1;
     } catch (e) {
       _updatingYtDlp = false;
@@ -140,19 +131,45 @@ class SettingsVM extends ChangeNotifier {
     }
   }
 
+  // ---- FFmpeg ----
   Future<bool> updateFfmpeg() async {
+    // Choose a writable directory to host ffmpeg.exe.
+    // Prefer the directory where yt-dlp.exe lives; otherwise fallback to C:\YtDlp.
+    var baseDir = r'c:\YtDlp';
+    if (_ytDlpPath != null) {
+      try {
+        baseDir = File(_ytDlpPath!).parent.path;
+      } catch (_) {}
+    }
+    final service = FfmpegService(targetDir: baseDir);
+
+    _updatingFfmpeg = true;
+    _ffmpegUpdateLog = null;
+    notifyListeners();
+
+    final logBuf = StringBuffer();
+
     try {
-      _lastFfmpegLog = 'Downloading FFmpeg...';
+      final path = await service.updateFfmpeg(onLog: (m) {
+        logBuf.writeln(m);
+        _ffmpegUpdateLog = logBuf.toString().trimRight();
+        notifyListeners();
+      });
+
+      // Refresh availability and remember update date
+      _ffmpegAvailable = await _repo.isFfmpegAvailable();
+      _ffmpegUpdateDate = DateFormat('dd/MM/yyyy hh:mm:ss').format(DateTime.now());
+      await _repo.setFfmpegUpdatedAt(_ffmpegUpdateDate!);
+
+      _updatingFfmpeg = false;
+      _ffmpegUpdateLog = '${logBuf.toString().trimRight()}\nDone → $path';
       notifyListeners();
-      final path = await _ffmpegService.updateFfmpeg();
-      _lastFfmpegLog = 'FFmpeg updated successfully: $path';
-      _ffmpegUpdateDate =
-          DateFormat('dd/MM/yyyy').format(DateTime.now());
+      return true;
     } catch (e) {
-      _lastFfmpegLog = 'FFmpeg update failed: $e';
+      _updatingFfmpeg = false;
+      _ffmpegUpdateLog = '${logBuf.toString().trimRight()}\nFailed: $e';
+      notifyListeners();
       return false;
     }
-    await refreshBinaryAvailability();
-    return true;
   }
 }
