@@ -35,7 +35,7 @@ class HomePage extends StatelessWidget {
                       hintText: 'https://www.youtube.com/watch?v=...  or playlist URL',
                       border: OutlineInputBorder(),
                     ),
-                    onChanged: (_) {},
+                    onChanged: (_) {}, // no need to notify here
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -86,13 +86,49 @@ class HomePage extends StatelessWidget {
 
             const SizedBox(height: 8),
 
-            // Diagnostics: yt-dlp + ffmpeg
+            // Diagnostics: yt-dlp path + version + FFmpeg + Update button
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
                 settings.ytDlpPath ?? '(yt-dlp not found yet)',
                 overflow: TextOverflow.ellipsis,
               ),
+            ),
+            Row(
+              children: [
+                Text(
+                  'yt-dlp version: ${settings.ytDlpVersion ?? 'unknown'}',
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: (dl.busy || settings.updatingYtDlp || settings.ytDlpPath == null)
+                      ? null
+                      : () => settings.checkYtDlpVersion(),
+                  icon: const Icon(Icons.info_outline),
+                  label: const Text('Check'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: (dl.busy || settings.updatingYtDlp || settings.ytDlpPath == null)
+                      ? null
+                      : () async {
+                          final ok = await settings.updateYtDlp();
+                          if (!context.mounted) return;
+                          final snack = SnackBar(
+                            content: Text(ok
+                                ? 'yt-dlp update finished.'
+                                : 'yt-dlp update failed.'),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(snack);
+                        },
+                  icon: settings.updatingYtDlp
+                      ? const SizedBox(
+                          width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.system_update),
+                  label: const Text('Update yt-dlp'),
+                ),
+              ],
             ),
             Align(
               alignment: Alignment.centerLeft,
@@ -105,6 +141,16 @@ class HomePage extends StatelessWidget {
                 ),
               ),
             ),
+            if (settings.lastUpdateLog != null) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  settings.lastUpdateLog!,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 16),
 
@@ -184,7 +230,7 @@ class HomePage extends StatelessWidget {
             const Divider(),
             const Text(
               'MVVM: SettingsVM + DownloadVM • Service: YtDlpService • Repo: SharedPreferences\n'
-              'Downloads with yt-dlp and converts to MP3 via FFmpeg. No YouTube API key required.',
+              'Self-update: yt-dlp -U (shows log & version). No YouTube API key required.',
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
           ],

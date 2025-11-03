@@ -18,7 +18,7 @@ Future<void> _setDesktopWindow() async {
       final screen = screens.first;
       final rect = screen.visibleFrame;
 
-      const double windowHeight = 1100;
+      const double windowHeight = 1200;
       final double windowWidth = 1100;
       final double posX = rect.right - windowWidth + 10;
       final double posY = (rect.height - windowHeight) / 2;

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-/// Thin service wrapping yt-dlp process handling and cancellation.
+/// Thin service wrapping yt-dlp process handling, progress parsing, and cancellation.
 class YtDlpService {
   Process? _proc;
 
@@ -29,8 +29,7 @@ class YtDlpService {
     }
   }
 
-  /// Starts yt-dlp with the given args.
-  /// Calls the provided callbacks on progress/status/destination.
+  /// Generic runner with progress/status/destination callbacks (for downloads).
   Future<int> run({
     required String exe,
     required List<String> args,
@@ -42,18 +41,14 @@ class YtDlpService {
 
     final subs = <StreamSubscription>[];
 
-    final stdoutLines = _proc!.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-
-    final stderrLines = _proc!.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
+    final stdoutLines =
+        _proc!.stdout.transform(utf8.decoder).transform(const LineSplitter());
+    final stderrLines =
+        _proc!.stderr.transform(utf8.decoder).transform(const LineSplitter());
 
     subs.add(stdoutLines.listen((line) {
       // Progress like: [download]  37.4% ...
-      final m =
-          RegExp(r'\[download\]\s+(\d+(?:\.\d+)?)%').firstMatch(line);
+      final m = RegExp(r'\[download\]\s+(\d+(?:\.\d+)?)%').firstMatch(line);
       if (m != null && onProgress != null) {
         final pct = double.tryParse(m.group(1)!);
         if (pct != null) onProgress(pct / 100.0);
@@ -91,5 +86,43 @@ class YtDlpService {
     _proc = null;
 
     return code;
+  }
+
+  /// Returns the output of `yt-dlp --version` (e.g., "2025.10.12").
+  /// Throws if the process fails.
+  Future<String> getVersion(String exe) async {
+    final res = await Process.run(exe, ['--version'], runInShell: true);
+    if (res.exitCode == 0) {
+      return (res.stdout as String).trim();
+    }
+    throw 'Failed to read yt-dlp version (exit ${res.exitCode}).';
+  }
+
+  /// Runs `yt-dlp -U` self-update. Returns the *full* console log (stdout+stderr)
+  /// so the caller can display a meaningful message to the user.
+  ///
+  /// Exit code 0 means success, 1 often means "already up to date",
+  /// but we rely on parsing the output text to decide what to display.
+  Future<(int code, String log)> selfUpdate(String exe) async {
+    final proc = await Process.start(exe, ['-U'], runInShell: true);
+
+    final buffer = StringBuffer();
+    final subs = <StreamSubscription>[];
+
+    subs.add(proc.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) => buffer.writeln(line)));
+
+    subs.add(proc.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) => buffer.writeln(line)));
+
+    final code = await proc.exitCode;
+    for (final s in subs) {
+      await s.cancel();
+    }
+    return (code, buffer.toString());
   }
 }
