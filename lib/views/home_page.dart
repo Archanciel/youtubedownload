@@ -14,7 +14,8 @@ class HomePage extends StatelessWidget {
     final settings = context.watch<SettingsVM>();
     final dl = context.watch<DownloadVM>();
 
-    final canDownload = !dl.busy &&
+    final canDownload =
+        !dl.busy &&
         settings.targetDir != 'No target folder chosen' &&
         dl.urlController.text.trim().isNotEmpty;
 
@@ -32,7 +33,8 @@ class HomePage extends StatelessWidget {
                     controller: dl.urlController,
                     decoration: const InputDecoration(
                       labelText: 'YouTube URL (video or playlist)',
-                      hintText: 'https://www.youtube.com/watch?v=...  or playlist URL',
+                      hintText:
+                          'https://www.youtube.com/watch?v=...  or playlist URL',
                       border: OutlineInputBorder(),
                     ),
                     onChanged: (_) {}, // no need to notify here
@@ -50,17 +52,22 @@ class HomePage extends StatelessWidget {
             const SizedBox(height: 12),
 
             // Folder picker
-            Row(children: [
-              Expanded(
-                child: Text(settings.targetDir, overflow: TextOverflow.ellipsis),
-              ),
-              const SizedBox(width: 12),
-              ElevatedButton.icon(
-                onPressed: dl.busy ? null : settings.pickDirectory,
-                icon: const Icon(Icons.folder_open),
-                label: const Text('Choose Folder'),
-              ),
-            ]),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    settings.targetDir,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                ElevatedButton.icon(
+                  onPressed: dl.busy ? null : settings.pickDirectory,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Choose Folder'),
+                ),
+              ],
+            ),
 
             const SizedBox(height: 12),
 
@@ -72,14 +79,16 @@ class HomePage extends StatelessWidget {
                 DropdownButton<String>(
                   value: settings.qualityLabel,
                   items: AudioQuality.labels()
-                      .map((label) => DropdownMenuItem(
-                            value: label,
-                            child: Text(label),
-                          ))
+                      .map(
+                        (label) =>
+                            DropdownMenuItem(value: label, child: Text(label)),
+                      )
                       .toList(),
-                  onChanged: dl.busy ? null : (val) {
-                    if (val != null) settings.setQualityLabel(val);
-                  },
+                  onChanged: dl.busy
+                      ? null
+                      : (val) {
+                          if (val != null) settings.setQualityLabel(val);
+                        },
                 ),
               ],
             ),
@@ -96,12 +105,13 @@ class HomePage extends StatelessWidget {
             ),
             Row(
               children: [
-                Text(
-                  'yt-dlp version: ${settings.ytDlpVersion ?? 'unknown'}',
-                ),
+                Text('yt-dlp version: ${settings.ytDlpVersion ?? 'unknown'}'),
                 const SizedBox(width: 12),
                 OutlinedButton.icon(
-                  onPressed: (dl.busy || settings.updatingYtDlp || settings.ytDlpPath == null)
+                  onPressed:
+                      (dl.busy ||
+                          settings.updatingYtDlp ||
+                          settings.ytDlpPath == null)
                       ? null
                       : () => settings.checkYtDlpVersion(),
                   icon: const Icon(Icons.info_outline),
@@ -109,37 +119,67 @@ class HomePage extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 FilledButton.icon(
-                  onPressed: (dl.busy || settings.updatingYtDlp || settings.ytDlpPath == null)
+                  onPressed:
+                      (dl.busy ||
+                          settings.updatingYtDlp ||
+                          settings.ytDlpPath == null)
                       ? null
                       : () async {
-                          final ok = await settings.updateYtDlp();
+                          final okYt = await settings.updateYtDlp();
                           if (!context.mounted) return;
                           final snack = SnackBar(
-                            content: Text(ok
-                                ? 'yt-dlp update finished.'
-                                : 'yt-dlp update failed.'),
+                            content: Text(
+                              okYt
+                                  ? 'yt-dlp update finished.'
+                                  : 'yt-dlp update failed.',
+                            ),
                           );
                           ScaffoldMessenger.of(context).showSnackBar(snack);
                         },
                   icon: settings.updatingYtDlp
                       ? const SizedBox(
-                          width: 16, height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : const Icon(Icons.system_update),
                   label: const Text('Update yt-dlp'),
                 ),
               ],
             ),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                settings.ffmpegAvailable
-                    ? 'FFmpeg: available'
-                    : 'FFmpeg: NOT found',
-                style: TextStyle(
-                  color: settings.ffmpegAvailable ? Colors.green : Colors.red,
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text('FFmpeg updated on: ${settings.ffmpegUpdateDate ?? 'unknown'}'),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed:
+                      (dl.busy ||
+                          settings.updatingYtDlp ||
+                          settings.ytDlpPath == null)
+                      ? null
+                      : () async {
+                          final okFF = await settings.updateFfmpeg();
+                          if (!context.mounted) return;
+                          final snack = SnackBar(
+                            content: Text(
+                              okFF
+                                  ? 'FFmpeg update finished.'
+                                  : 'FFmpeg update failed.',
+                            ),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(snack);
+                        },
+                  icon: settings.updatingYtDlp
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.system_update),
+                  label: const Text('Update FFmpeg'),
                 ),
-              ),
+              ],
             ),
             if (settings.lastUpdateLog != null) ...[
               const SizedBox(height: 8),
@@ -155,25 +195,29 @@ class HomePage extends StatelessWidget {
             const SizedBox(height: 16),
 
             // Actions
-            Row(children: [
-              ElevatedButton.icon(
-                onPressed: canDownload ? dl.download : null,
-                icon: const Icon(Icons.download),
-                label: const Text('Download audio'),
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                onPressed: dl.busy ? dl.cancel : null,
-                icon: const Icon(Icons.cancel),
-                label: const Text('Cancel'),
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                onPressed: dl.busy ? null : settings.refreshBinaryAvailability,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Refresh binaries'),
-              ),
-            ]),
+            Row(
+              children: [
+                ElevatedButton.icon(
+                  onPressed: canDownload ? dl.download : null,
+                  icon: const Icon(Icons.download),
+                  label: const Text('Download audio'),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: dl.busy ? dl.cancel : null,
+                  icon: const Icon(Icons.cancel),
+                  label: const Text('Cancel'),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: dl.busy
+                      ? null
+                      : settings.refreshBinaryAvailability,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Refresh binaries'),
+                ),
+              ],
+            ),
 
             const SizedBox(height: 16),
 
@@ -190,10 +234,7 @@ class HomePage extends StatelessWidget {
                 ),
               ),
             ] else
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(dl.status),
-              ),
+              Align(alignment: Alignment.centerLeft, child: Text(dl.status)),
 
             const SizedBox(height: 8),
 
@@ -201,8 +242,10 @@ class HomePage extends StatelessWidget {
             if (dl.lastOutputPath != null) ...[
               Align(
                 alignment: Alignment.centerLeft,
-                child: Text('Saved to: ${dl.lastOutputPath!}',
-                    overflow: TextOverflow.ellipsis),
+                child: Text(
+                  'Saved to: ${dl.lastOutputPath!}',
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
               const SizedBox(height: 4),
               Align(

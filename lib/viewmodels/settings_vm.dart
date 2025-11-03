@@ -1,13 +1,16 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../constants.dart';
 import '../data/settings_repository.dart';
 import '../domain/audio_quality.dart';
+import '../services/ffmpeg_service.dart';
 import '../services/yt_dlp_service.dart';
 
 /// Holds app-wide settings/state: target directory, audio quality, binaries.
 class SettingsVM extends ChangeNotifier {
+  final FfmpegService _ffmpegService = FfmpegService('c:\\YtDlp');
   late SettingsRepository _repo;
   late YtDlpService _service;
 
@@ -24,6 +27,9 @@ class SettingsVM extends ChangeNotifier {
   bool _ffmpegAvailable = false;
   bool get ffmpegAvailable => _ffmpegAvailable;
 
+  String? _ffmpegUpdateDate;
+  String? get ffmpegUpdateDate => _ffmpegUpdateDate;
+
   // --- New: yt-dlp version + update state
   String? _ytDlpVersion;
   String? get ytDlpVersion => _ytDlpVersion;
@@ -33,6 +39,9 @@ class SettingsVM extends ChangeNotifier {
 
   String? _lastUpdateLog;
   String? get lastUpdateLog => _lastUpdateLog;
+
+  String? _lastFfmpegLog;
+  String? get lastFfmpegLog => _lastFfmpegLog;
 
   void attach(SettingsRepository repo, YtDlpService service) {
     _repo = repo;
@@ -129,5 +138,21 @@ class SettingsVM extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  Future<bool> updateFfmpeg() async {
+    try {
+      _lastFfmpegLog = 'Downloading FFmpeg...';
+      notifyListeners();
+      final path = await _ffmpegService.updateFfmpeg();
+      _lastFfmpegLog = 'FFmpeg updated successfully: $path';
+      _ffmpegUpdateDate =
+          DateFormat('dd/MM/yyyy').format(DateTime.now());
+    } catch (e) {
+      _lastFfmpegLog = 'FFmpeg update failed: $e';
+      return false;
+    }
+    await refreshBinaryAvailability();
+    return true;
   }
 }
