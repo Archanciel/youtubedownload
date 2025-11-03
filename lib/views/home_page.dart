@@ -50,6 +50,46 @@ class HomePage extends StatelessWidget {
             ),
 
             const SizedBox(height: 12),
+            // JSON picker row
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    dl.pickedPlaylistJson ?? '(no playlist JSON selected)',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: dl.busy ? null : dl.pickPlaylistJson,
+                  icon: const Icon(Icons.upload_file),
+                  label: const Text('Select Playlist JSON'),
+                ),
+              ],
+            ),
+
+            if (dl.loadedPlaylist != null) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Playlist: ${dl.loadedPlaylist!.title} • Downloaded: ${dl.loadedPlaylist!.downloadedAudioLst.length}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 8),
+
+            FilledButton.icon(
+              onPressed: (dl.busy || dl.loadedPlaylist == null)
+                  ? null
+                  : dl.downloadMissingFromPickedJson,
+              icon: const Icon(Icons.playlist_add),
+              label: const Text('Download playlist (missing only)'),
+            ),
+
+            const SizedBox(height: 12),
 
             // Folder picker
             Row(
