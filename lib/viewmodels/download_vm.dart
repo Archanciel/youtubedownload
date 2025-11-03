@@ -1,71 +1,86 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+// lib/viewmodels/download_vm.dart
 
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
-import '../services/playlist_sync_service.dart';
-import '../services/settings_data_service.dart';
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../constants.dart';
 import '../models/playlist.dart';
-
-import '../services/yt_dlp_service.dart';
+import '../services/playlist_sync_service.dart'; // the service I provided
+import '../services/settings_data_service.dart';
+import '../utils/dir_util.dart';
 import '../viewmodels/settings_vm.dart';
+import '../services/yt_dlp_service.dart';
 
-/// Handles the download action, progress, cancel, and UI state.
 class DownloadVM extends ChangeNotifier {
-  late SettingsVM _settings;
-  late YtDlpService _service;
-
-  final TextEditingController urlController = TextEditingController();
-
+  // Existing fields you already had...
   bool _busy = false;
-  bool get busy => _busy;
-
   double _progress = 0.0;
-  double get progress => _progress;
-
   String _status = 'Idle';
-  String get status => _status;
-
   String? _lastOutputPath;
+
+  bool get busy => _busy;
+  double get progress => _progress;
+  String get status => _status;
   String? get lastOutputPath => _lastOutputPath;
-  final _runner = ProcessRunner();
 
+  // ——— New fields for playlist flow ———
+  SettingsVM? _settingsVM;
+  YtDlpService? _ytService;
+
+  late PlaylistSyncService _sync; // constructed in attach
+  late ProcessRunner _runner; // used by the service
   String? _pickedPlaylistJson;
-  String? get pickedPlaylistJson => _pickedPlaylistJson;
-
   Playlist? _loadedPlaylist;
+
+  String? get pickedPlaylistJson => _pickedPlaylistJson;
   Playlist? get loadedPlaylist => _loadedPlaylist;
 
-  late SettingsDataService _settingsDataService;
-  void attachSettings(SettingsDataService sds) => _settingsDataService = sds;
+  /// Called by Provider's update() in your YtAudioDownloaderApp.
+  Future<void> attach(SettingsVM settingsVM, YtDlpService ytService) async {
+    _settingsVM = settingsVM;
+    _ytService = ytService;
 
-  // Injected from SettingsVM/UI once binaries are detected
-  late String _ytDlpExe;
-  String? _ffprobeExe;
-  late String _qualityVbr; // e.g. from SettingsVM.qualityVbr
-  late double _defaultPlaySpeed; // e.g. from SettingsDataService
+    // A minimal runner implementation (you can also adapt YtDlpService to implement ProcessRunner)
+    _runner = ProcessRunner();
 
-  void attach(SettingsVM settings, YtDlpService service) {
-    _settings = settings;
-    _service = service;
+    // Gather values from SettingsVM; make sure SettingsVM exposes these
+    final ytPath = settingsVM.ytDlpPath; // e.g. C:\YtDlp\yt-dlp.exe
+    final ffprobe = settingsVM.ffprobePath; // nullable; e.g. 'ffprobe'
+    final defaultPS = settingsVM
+        .defaultPlaySpeed; // from settings repo (e.g. Playlists.playSpeed)
+    final qualityVbr = settingsVM.qualityVbr;
+    // "0".."9" you selected in UI (we can pass later)
+    final SettingsDataService settingsDataService = SettingsDataService(
+      sharedPreferences: await SharedPreferences.getInstance(),
+      isTest: false,
+    );
+
+    await settingsDataService.loadSettingsFromFile(
+      settingsJsonPathFileName:
+          '${DirUtil.getApplicationPath(isTest: false)}${Platform.pathSeparator}$kSettingsFileName',
+    );
+
+    // Build the sync service (idempotent; safe if called multiple times)
+    _sync = PlaylistSyncService(
+      runner: _runner,
+      settings: settingsDataService, // or expose a getter to your underlying SettingsDataService
+      ytDlpExe: ytPath ?? r'C:\YtDlp\yt-dlp.exe',
+      ffprobeExe: (ffprobe != null && ffprobe.isNotEmpty) ? ffprobe : null,
+      defaultPlaySpeed: defaultPS,
+      saveAfterEachItem: true,
+    );
+
+    // If you want to react immediately when user changes quality in UI,
+    // you can keep `qualityVbr` in this VM as well; or just pass an override
+    // when calling downloadMissingFromPickedJson().
+
+    notifyListeners();
   }
 
-  void attachBinariesAndPrefs({
-    required String ytDlpExe,
-    String? ffprobeExe,
-    required String qualityVbr,
-    double? defaultPlaySpeed,
-  }) {
-    _ytDlpExe = ytDlpExe;
-    _ffprobeExe = ffprobeExe;
-    _qualityVbr = qualityVbr;
-    _defaultPlaySpeed =
-        defaultPlaySpeed ??
-        (_settingsDataService.get(
-              settingType: SettingType.playlists,
-              settingSubType: Playlists.playSpeed,
-            )
-            as double);
-  }
+  // ——— UI actions ———
 
   Future<void> pickPlaylistJson() async {
     final result = await FilePicker.platform.pickFiles(
@@ -74,23 +89,25 @@ class DownloadVM extends ChangeNotifier {
       allowedExtensions: ['json'],
     );
     if (result == null) return;
+
     _pickedPlaylistJson = result.files.single.path!;
+    _status = 'Loading playlist…';
     notifyListeners();
 
-    // Load as your Playlist via JsonDataService (through the service)
-    final sync = PlaylistSyncService(
-      runner: _runner,
-      settings: _settingsDataService,
-      ytDlpExe: _ytDlpExe,
-      ffprobeExe: _ffprobeExe,
-      defaultPlaySpeed: _defaultPlaySpeed,
-    );
-
-    _loadedPlaylist = await sync.loadPlaylistFromJson(_pickedPlaylistJson!);
+    try {
+      _loadedPlaylist = await _sync.loadPlaylistFromJson(_pickedPlaylistJson!);
+      _status = 'Loaded: ${_loadedPlaylist!.title}';
+    } catch (e) {
+      _status = 'Failed to load JSON: $e';
+      _pickedPlaylistJson = null;
+      _loadedPlaylist = null;
+    }
     notifyListeners();
   }
 
-  Future<void> downloadMissingFromPickedJson() async {
+  Future<void> downloadMissingFromPickedJson({
+    String? qualityVbrOverride,
+  }) async {
     if (_pickedPlaylistJson == null || _loadedPlaylist == null) {
       _status = 'Pick a playlist JSON first.';
       notifyListeners();
@@ -100,147 +117,39 @@ class DownloadVM extends ChangeNotifier {
 
     _busy = true;
     _progress = 0.0;
-    _status = 'Starting…';
+    _status = 'Starting playlist download…';
     notifyListeners();
 
-    final sync = PlaylistSyncService(
-      runner: _runner,
-      settings: _settingsDataService,
-      ytDlpExe: _ytDlpExe,
-      ffprobeExe: _ffprobeExe,
-      defaultPlaySpeed: _defaultPlaySpeed,
-      saveAfterEachItem: true, // safer
-    );
-
     try {
-      await sync.downloadMissingAudios(
+      await _sync.downloadMissingAudios(
         playlistJsonPathFileName: _pickedPlaylistJson!,
         playlist: _loadedPlaylist!,
-        // If you want to force UI-selected VBR, pass qualityVbrOverride: _qualityVbr,
-        onStatus: (s) {
-          _status = s;
+        qualityVbrOverride: qualityVbrOverride ?? _settingsVM?.qualityVbr,
+        onStatus: (msg) {
+          _status = msg;
           notifyListeners();
         },
-        onProgress: (p) {
-          _progress = p;
+        onProgress: (pct) {
+          _progress = pct;
           notifyListeners();
         },
         onItemIndex: (cur, tot) {
           /* optionally expose per-item index */
         },
       );
-      // After completion, update `lastOutputPath` if you like
+
+      // Update a convenient path for “Open folder” style buttons
+      if (_loadedPlaylist!.playableAudioLst.isNotEmpty) {
+        _lastOutputPath = p.join(
+          _loadedPlaylist!.downloadPath,
+          _loadedPlaylist!.playableAudioLst.first.audioFileName,
+        );
+      }
     } catch (e) {
       _status = 'Failed: $e';
     } finally {
       _busy = false;
       notifyListeners();
     }
-  }
-
-  void _setBusy(bool value) {
-    _busy = value;
-    notifyListeners();
-  }
-
-  void _setProgress(double v) {
-    _progress = v.clamp(0.0, 1.0);
-    notifyListeners();
-  }
-
-  void _setStatus(String s) {
-    _status = s;
-    notifyListeners();
-  }
-
-  void _setLastOutput(String? path) {
-    _lastOutputPath = path;
-    notifyListeners();
-  }
-
-  Future<void> pasteFromClipboard() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text?.trim();
-    if (text != null && text.isNotEmpty) {
-      urlController.text = text;
-      notifyListeners();
-    }
-  }
-
-  Future<void> download() async {
-    final url = urlController.text.trim();
-    if (url.isEmpty) {
-      _setStatus('Please paste a YouTube URL.');
-      return;
-    }
-    if (_settings.targetDir == 'No target folder chosen') {
-      _setStatus('Please choose a target folder first.');
-      return;
-    }
-    if (!_settings.ffmpegAvailable) {
-      _setStatus(
-        'FFmpeg not found: place ffmpeg.exe next to yt-dlp.exe or add it to PATH.',
-      );
-      return;
-    }
-    if (_settings.ytDlpPath == null) {
-      _setStatus('yt-dlp not found (c:\\YtDlp, PATH, or working dir).');
-      return;
-    }
-
-    _setBusy(true);
-    _setProgress(0.0);
-    _setLastOutput(null);
-    _setStatus('Preparing…');
-
-    final outTpl = '${_settings.targetDir}\\%(title).150s.%(ext)s';
-
-    final args = [
-      '--yes-playlist',
-      '-f',
-      'bestaudio/best',
-      '--extract-audio',
-      '--audio-format',
-      'mp3',
-      '--audio-quality',
-      _settings.qualityVbr,
-      '-o',
-      outTpl,
-      '--restrict-filenames',
-      '--newline',
-      url,
-    ];
-
-    _setStatus(
-      'Downloading and converting to MP3… (quality ${_settings.qualityLabel})',
-    );
-
-    try {
-      final code = await _service.run(
-        exe: _settings.ytDlpPath!,
-        args: args,
-        onProgress: (pct) => _setProgress(pct),
-        onStatus: (s) => _setStatus(s),
-        onDestination: (path) => _setLastOutput(path),
-      );
-
-      if (code == 0) {
-        _setProgress(1.0);
-        _setStatus('Download completed (MP3 ready).');
-      } else {
-        _setStatus('yt-dlp exited with code $code');
-      }
-    } catch (e) {
-      _setStatus('yt-dlp failed: $e');
-    } finally {
-      _setBusy(false);
-    }
-  }
-
-  Future<void> cancel() async {
-    await _service.killIfRunning();
-    _setBusy(false);
-    _setProgress(0.0);
-    _setStatus('Canceled.');
   }
 }
