@@ -56,14 +56,13 @@ class HomePage extends StatelessWidget {
                 Expanded(
                   child: Text(
                     dl.pickedPlaylistJson ?? '(no playlist JSON selected)',
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 const SizedBox(width: 12),
                 OutlinedButton.icon(
                   onPressed: dl.busy ? null : dl.pickPlaylistJson,
                   icon: const Icon(Icons.upload_file),
-                  label: const Text('Select Playlist JSON'),
+                  label: const Text('Select playlist JSON'),
                 ),
               ],
             ),
@@ -86,7 +85,7 @@ class HomePage extends StatelessWidget {
                   ? null
                   : dl.downloadMissingFromPickedJson,
               icon: const Icon(Icons.playlist_add),
-              label: const Text('Download playlist (missing only)'),
+              label: const Text('Download playlist'),
             ),
 
             const SizedBox(height: 12),
