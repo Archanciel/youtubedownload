@@ -3,8 +3,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
@@ -314,10 +314,11 @@ class DownloadVM extends ChangeNotifier {
     // Progress: item index + per-item progress
     final total = missing.length;
     final vbr = settings.qualityVbr; // "0".."9"
-    final ffprobe = settings.ffprobePath; // may be null
     final defaultPlaySpeed = settings.defaultPlaySpeed; // double
 
-    final outTpl = path.join(destDir, '%(title).150s.%(ext)s');
+    // AudioPlayer is used to get the audio duration of the
+    // downloaded audio files
+    final AudioPlayer audioPlayer = AudioPlayer();
 
     // 4) Process missing items one by one
     for (int i = 0; i < total; i++) {
@@ -327,7 +328,7 @@ class DownloadVM extends ChangeNotifier {
 
       // Overall progress = completed items + current item progress
       double perItemProgress = 0.0;
-      void _updateOverall(double currentPct) {
+      void updateOverall(double currentPct) {
         perItemProgress = currentPct.clamp(0.0, 1.0);
         _progress = ((i) + perItemProgress) / total;
         notifyListeners();
@@ -336,41 +337,64 @@ class DownloadVM extends ChangeNotifier {
       _setStatus('[$humanIdx/$total] Fetching metadata…');
       notifyListeners();
 
-      // 4a) Fetch metadata JSON for uploader, upload_date, description
+      // ---- 4a) metadata
       late final _VideoMeta meta;
       try {
         meta = await _readVideoMeta(yt, videoUrl);
       } catch (e) {
-        // Skip this item but continue
         _setStatus('[$humanIdx/$total] Metadata failed: $e — skipping');
         continue;
       }
 
-      // 4b) Download with progress → MP3
-      _setStatus('[$humanIdx/$total] Downloading “${meta.title}”…');
+      // ---- 4b) Create the Audio FIRST so it defines the final file path
+      // Pick the play speed exactly like your app logic
+      final double playSpeed =
+          defaultPlaySpeed; // from SettingsVM, already computed above
+
+      final audio = Audio(
+        youtubeVideoChannel: meta.uploader ?? '',
+        enclosingPlaylist: _loadedPlaylist!,
+        originalVideoTitle: meta.title,
+        compactVideoDescription: _compactDescription(
+          meta.description ?? '',
+          meta.uploader ?? '',
+        ),
+        videoUrl: videoUrl,
+        audioDownloadDateTime: DateTime.now(),
+        videoUploadDate: meta.uploadDate ?? DateTime(1, 1, 1),
+        audioDuration:
+            Duration.zero, // will be set after download (ffprobe or player)
+        audioPlaySpeed: playSpeed,
+      );
+
+      // This is your canonical absolute MP3 path (Windows or Android),
+      // provided by your model. Ensure its directory exists.
+      final String targetMp3Path = audio.filePathName;
+
+      // ---- 4c) Download with yt-dlp to the EXACT target path
+      _setStatus('[$humanIdx/$total] Downloading “${audio.validVideoTitle}”…');
+
+      // IMPORTANT: no template, no --print; give the absolute file path.
       final args = <String>[
         '-f', 'bestaudio/best',
         '--extract-audio',
         '--audio-format', 'mp3',
-        '--audio-quality', vbr,
-        '-o', outTpl,
-        '--restrict-filenames',
+        '--audio-quality', vbr, // "0".."9"
+        '-o', targetMp3Path, // <<<<< write exactly where Audio expects
         '--newline',
-        '--print', 'after_move:filepath', // capture final path
+        '--no-overwrites', // optional safety
         videoUrl,
       ];
 
       final sw = Stopwatch()..start();
-      String? finalPath;
-      int? expectedSize;
       try {
         final result = await _runYtDlpWithProgress(
           ytExe: yt,
           args: args,
-          onPercent: (pct) => _updateOverall(pct),
+          onPercent: (pct) => updateOverall(pct),
           onStderr: (line) => _setStatus('[$humanIdx/$total] $line'),
-          onFinalPath: (p) => finalPath = p,
-          onExpectedSizeBytes: (b) => expectedSize = b,
+          // We do NOT need onFinalPath anymore.
+          // We know exactly where the file is: targetMp3Path.
         );
 
         if (result != 0) {
@@ -386,65 +410,36 @@ class DownloadVM extends ChangeNotifier {
         sw.stop();
       }
 
-      if (finalPath == null) {
-        _setStatus(
-          '[$humanIdx/$total] Could not resolve final MP3 path — skipping',
-        );
-        continue;
-      }
+      // ---- 4d) Post download: set duration and size, then append to playlist
 
-      // 4c) Determine duration (ffprobe if available), file size, then create Audio
-      if (finalPath == null) {
-        _setStatus(
-          '[$humanIdx/$total] Could not resolve final MP3 path — skipping',
-        );
-        continue;
-      }
-
-      final Duration duration = (ffprobe != null && ffprobe.isNotEmpty)
-          ? (await _probeDuration(
-              ffprobe,
-              finalPath!,
-            ).catchError((_) => Duration.zero))
-          : Duration.zero;
-
-      final fileSize = await File(finalPath!).length();
-
-      // --- 4d) Create Audio and append into playlist lists ---
-      final audio = Audio(
-        youtubeVideoChannel: meta.uploader ?? '',
-        enclosingPlaylist: _loadedPlaylist!,
-        originalVideoTitle: meta.title,
-        compactVideoDescription: _compactDescription(
-          meta.description ?? '',
-          meta.uploader ?? '',
-        ),
-        videoUrl: videoUrl,
-        audioDownloadDateTime: DateTime.now(),
-        videoUploadDate: meta.uploadDate ?? DateTime(1, 1, 1),
-        audioDuration: duration,
-        audioPlaySpeed: defaultPlaySpeed,
+      // Fallback: estimate duration based on audio player speed settings
+      audio.audioDuration = await getMp3DurationWithAudioPlayer(
+        audioPlayer: audioPlayer,
+        filePathName: audio.filePathName,
       );
-      audio.fileSize = fileSize;
+
       audio.downloadDuration = sw.elapsed;
+      audio.fileSize = await File(targetMp3Path).length();
 
       _loadedPlaylist!.addDownloadedAudio(audio);
 
-      // --- 4e) Persist playlist JSON (use the file you picked) ---
+      // ---- 4e) Persist JSON to the file the user picked
       try {
         JsonDataService.saveToFile(
           model: _loadedPlaylist!,
-          path: _pickedPlaylistJson!, // same file selected in UI
+          path: _pickedPlaylistJson!, // same playlist JSON selected by the user
         );
       } catch (e) {
         _setStatus('[$humanIdx/$total] JSON save warning: $e');
       }
 
-      // For the UI footer
-      _lastOutputPath = finalPath;
-      _updateOverall(1.0);
+      // UI footer and progress polish
+      _lastOutputPath = targetMp3Path;
+      updateOverall(1.0);
       _setStatus('[$humanIdx/$total] Added: ${audio.validVideoTitle}');
     }
+
+    audioPlayer.dispose();
 
     _busy = false;
     _progress = 1.0;
@@ -453,6 +448,20 @@ class DownloadVM extends ChangeNotifier {
   }
 
   // ---- helpers -------------------------------------------------------------
+  Future<Duration> getMp3DurationWithAudioPlayer({
+    required AudioPlayer? audioPlayer,
+    required String filePathName,
+  }) async {
+    Duration? duration;
+
+    // Load audio file into audio player
+    await audioPlayer!.setSource(DeviceFileSource(filePathName));
+
+    // Get duration
+    duration = await audioPlayer.getDuration();
+
+    return duration ?? Duration.zero;
+  }
 
   Future<List<_FlatEntry>> _listFlatPlaylistEntries(
     String yt,
@@ -709,28 +718,6 @@ class DownloadVM extends ChangeNotifier {
       default:
         return n.round();
     }
-  }
-
-  Future<Duration> _probeDuration(String ffprobeExe, String filePath) async {
-    // ffprobe -v error -show_entries format=duration -of json "file"
-    final proc = await Process.start(ffprobeExe, [
-      '-v',
-      'error',
-      '-show_entries',
-      'format=duration',
-      '-of',
-      'json',
-      filePath,
-    ], runInShell: true);
-    final out = await proc.stdout.transform(utf8.decoder).join();
-    await proc.stderr.drain();
-    final code = await proc.exitCode;
-    if (code != 0) return Duration.zero;
-    final m = jsonDecode(out) as Map<String, dynamic>;
-    final fmt = (m['format'] ?? {}) as Map<String, dynamic>;
-    final durStr = (fmt['duration'] ?? '').toString();
-    final secs = double.tryParse(durStr) ?? 0.0;
-    return Duration(milliseconds: (secs * 1000).round());
   }
 
   String? _extractVideoIdFromUrl(String url) {

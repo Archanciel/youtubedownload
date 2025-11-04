@@ -53,20 +53,6 @@ class SettingsVM extends ChangeNotifier {
   // NEW: cache default play speed (comes from repo)
   final double _defaultPlaySpeed = kAudioDefaultPlaySpeed;
   double get defaultPlaySpeed => _defaultPlaySpeed;
-
-  String _qualityLabelToVbr(String label) {
-    // map your UI label (e.g., "Best (V0)") to "0" etc.
-    // Or, if you already store "0".."9", just return it.
-    // Example:
-    switch (label) {
-      case 'Best (V0)': return '0';
-      case 'High (V2)': return '2';
-      case 'Good (V4)': return '4';
-      case 'Light (V7)': return '7';
-      case 'Very light (V9)': return '9';
-      default: return '7';
-    }
-  }
   
   void attach(SettingsRepository repo, YtDlpService service) {
     _repo = repo;
