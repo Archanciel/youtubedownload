@@ -143,16 +143,8 @@ class DownloadVM extends ChangeNotifier {
           .transform(utf8.decoder)
           .transform(const LineSplitter());
 
-      String? printedFinalPath;
-
       final subs = <StreamSubscription>[
         stdoutLines.listen((line) {
-          // A plain line that is an absolute/relative path from --print
-          if (!_looksLikeYtDlpProgress(line) && _looksLikeAPath(line)) {
-            printedFinalPath = line.trim();
-            // do not notify here; wait for completion
-          }
-
           final m = RegExp(r'\[download\]\s+(\d+(?:\.\d+)?)%').firstMatch(line);
           if (m != null) {
             final pct = double.tryParse(m.group(1)!);
@@ -176,9 +168,6 @@ class DownloadVM extends ChangeNotifier {
 
       if (code == 0) {
         _progress = 1.0;
-        if (printedFinalPath != null && printedFinalPath!.isNotEmpty) {
-          _lastOutputPath = printedFinalPath;
-        }
         _setStatus('Download completed (MP3 ready).');
       } else {
         _setStatus('yt-dlp exited with code $code');
@@ -647,13 +636,6 @@ class DownloadVM extends ChangeNotifier {
         .transform(const LineSplitter());
 
     final c1 = stdoutLines.listen((line) {
-      // 1) Try to capture an explicit filename printed by --print filename
-      // (plain path, no prefix)
-      final trimmed = line.trim();
-      if (_looksLikeAPath(trimmed)) {
-        onFinalPath?.call(trimmed);
-      }
-
       // 2) Progress from stdout
       final m = RegExp(r'\[download\]\s+(\d+(?:\.\d+)?)%').firstMatch(line);
       if (m != null) {
@@ -741,18 +723,6 @@ class DownloadVM extends ChangeNotifier {
   void _setStatus(String s) {
     _status = s;
     // notifyListeners() is called by callers at appropriate cadence
-  }
-
-  bool _looksLikeYtDlpProgress(String line) =>
-      line.contains('[download]') || line.contains('[ExtractAudio]');
-
-  bool _looksLikeAPath(String line) {
-    // Very permissive: we rely on yt-dlp --print to output a path.
-    // Windows absolute path (C:\...) or any line ending with .mp3
-    final trimmed = line.trim();
-    if (trimmed.isEmpty) return false;
-    if (trimmed.endsWith('.mp3')) return true;
-    return RegExp(r'^[A-Za-z]:[\\/]').hasMatch(trimmed);
   }
 
   @override
