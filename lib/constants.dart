@@ -9,6 +9,7 @@ class Defaults {
   static const defaultQualityLabel = 'Best (V0)';
 }
 
+const String kApplicationVersion = '1.0.0';
 const String kImposedPlaylistsSubDirName = 'playlists';
 
 // Used for Android app version

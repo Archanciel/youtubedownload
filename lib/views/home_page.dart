@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../constants.dart';
 import '../domain/audio_quality.dart';
 import '../viewmodels/settings_vm.dart';
 import '../viewmodels/download_vm.dart';
@@ -20,7 +21,17 @@ class HomePage extends StatelessWidget {
         dl.urlController.text.trim().isNotEmpty;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('YouTube Audio Downloader (Windows)')),
+      appBar: AppBar(
+        title: const Text('YouTube Audio Downloader (Windows)'),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.settings),
+            onPressed: () => _showSettingsDialog(context: context),
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -323,6 +334,21 @@ class HomePage extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showSettingsDialog({required BuildContext context}) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('MP3 Extractor $kApplicationVersion'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('Fermer'),
+          ),
+        ],
       ),
     );
   }
