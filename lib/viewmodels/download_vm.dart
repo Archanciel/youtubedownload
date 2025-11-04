@@ -7,11 +7,36 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as p;
+import 'package:path/path.dart' as path;
 
+import '../models/audio.dart';
 import '../models/playlist.dart';
 import '../services/yt_dlp_service.dart';
+import '../services/json_data_service.dart';
 import '../viewmodels/settings_vm.dart';
+
+// --- Private helper types (file-local) --------------------------------------
+
+class _FlatEntry {
+  final String id;
+  final String title;
+  const _FlatEntry({required this.id, required this.title});
+}
+
+class _VideoMeta {
+  final String id;
+  final String title;
+  final String? uploader;
+  final String? description;
+  final DateTime? uploadDate;
+  const _VideoMeta({
+    required this.id,
+    required this.title,
+    this.uploader,
+    this.description,
+    this.uploadDate,
+  });
+}
 
 class DownloadVM extends ChangeNotifier {
   // ---------- Public state consumed by UI ----------
@@ -43,7 +68,8 @@ class DownloadVM extends ChangeNotifier {
 
   void attach(SettingsVM settings, YtDlpService service) {
     _settings = settings;
-    _ytService = service; // currently unused for download (direct Process), but kept for future use
+    _ytService =
+        service; // currently unused for download (direct Process), but kept for future use
   }
 
   // ---------- Clipboard ----------
@@ -83,7 +109,7 @@ class DownloadVM extends ChangeNotifier {
     }
 
     // Final MP3 path will be printed by yt-dlp via --print after_move:filepath
-    final outTpl = p.join(targetDir, '%(title).150s.%(ext)s');
+    final outTpl = path.join(targetDir, '%(title).150s.%(ext)s');
 
     // VBR: "0" .. "9" from SettingsVM (maps from your dropdown labels)
     final vbr = settings.qualityVbr; // e.g. "0", "2", "4", "7", "9"
@@ -98,7 +124,7 @@ class DownloadVM extends ChangeNotifier {
       '--restrict-filenames',
       '--newline',
       // print the final moved path so we can set lastOutputPath deterministically
-      '--print', 'after_move:filepath',
+      '--print', 'filename', // guaranteed final filename
       url,
     ];
 
@@ -223,15 +249,505 @@ class DownloadVM extends ChangeNotifier {
       return;
     }
 
-    // Here you will do:
-    // 1) Inspect _loadedPlaylist.downloadedAudioLst and/or playableAudioLst
-    // 2) For each missing video/audio, call yt-dlp similarly to download()
-    // 3) Update _progress and _status across items, and persist playlist JSON
-    //
-    // This VM already contains the single-video pipeline (download()) that
-    // you can reuse in a loop.
-    _setStatus('Playlist download (missing only) not yet implemented.');
+    final settings = _settings;
+    if (settings == null) {
+      _setStatus('Internal error: SettingsVM not attached.');
+      notifyListeners();
+      return;
+    }
+
+    final yt = settings.ytDlpPath;
+    if (yt == null || yt.isEmpty) {
+      _setStatus('yt-dlp.exe not found. Use “Refresh binaries” or install it.');
+      notifyListeners();
+      return;
+    }
+
+    final playlistUrl = _loadedPlaylist!.url;
+    if (playlistUrl.isEmpty || !playlistUrl.contains('list=')) {
+      _setStatus('Invalid playlist URL in JSON.');
+      notifyListeners();
+      return;
+    }
+
+    // Ensure destination directory exists (from the JSON)
+    final destDir = _loadedPlaylist!.downloadPath.trim();
+    if (destDir.isEmpty) {
+      _setStatus('Playlist JSON has empty downloadPath.');
+      notifyListeners();
+      return;
+    }
+
+    // 1) List entries quickly (ids + titles) without resolving streams
+    _busy = true;
+    _progress = 0.0;
+    _setStatus('Reading playlist entries…');
     notifyListeners();
+
+    late final List<_FlatEntry> entries;
+    try {
+      entries = await _listFlatPlaylistEntries(yt, playlistUrl);
+    } catch (e) {
+      _busy = false;
+      _setStatus('Failed to list playlist: $e');
+      notifyListeners();
+      return;
+    }
+
+    // 2) Build set of already downloaded video IDs from your JSON
+    final existingIds = <String>{};
+    for (final a in _loadedPlaylist!.downloadedAudioLst) {
+      final id = _extractVideoIdFromUrl(a.videoUrl);
+      if (id != null) existingIds.add(id);
+    }
+
+    // 3) Compute missing items
+    final missing = entries.where((e) => !existingIds.contains(e.id)).toList();
+    if (missing.isEmpty) {
+      _busy = false;
+      _progress = 1.0;
+      _setStatus('No missing audios. Playlist is up to date.');
+      notifyListeners();
+      return;
+    }
+
+    // Progress: item index + per-item progress
+    final total = missing.length;
+    final vbr = settings.qualityVbr; // "0".."9"
+    final ffprobe = settings.ffprobePath; // may be null
+    final defaultPlaySpeed = settings.defaultPlaySpeed; // double
+
+    final outTpl = path.join(destDir, '%(title).150s.%(ext)s');
+
+    // 4) Process missing items one by one
+    for (int i = 0; i < total; i++) {
+      final item = missing[i];
+      final videoUrl = 'https://www.youtube.com/watch?v=${item.id}';
+      final humanIdx = i + 1;
+
+      // Overall progress = completed items + current item progress
+      double perItemProgress = 0.0;
+      void _updateOverall(double currentPct) {
+        perItemProgress = currentPct.clamp(0.0, 1.0);
+        _progress = ((i) + perItemProgress) / total;
+        notifyListeners();
+      }
+
+      _setStatus('[$humanIdx/$total] Fetching metadata…');
+      notifyListeners();
+
+      // 4a) Fetch metadata JSON for uploader, upload_date, description
+      late final _VideoMeta meta;
+      try {
+        meta = await _readVideoMeta(yt, videoUrl);
+      } catch (e) {
+        // Skip this item but continue
+        _setStatus('[$humanIdx/$total] Metadata failed: $e — skipping');
+        continue;
+      }
+
+      // 4b) Download with progress → MP3
+      _setStatus('[$humanIdx/$total] Downloading “${meta.title}”…');
+      final args = <String>[
+        '-f', 'bestaudio/best',
+        '--extract-audio',
+        '--audio-format', 'mp3',
+        '--audio-quality', vbr,
+        '-o', outTpl,
+        '--restrict-filenames',
+        '--newline',
+        '--print', 'after_move:filepath', // capture final path
+        videoUrl,
+      ];
+
+      final sw = Stopwatch()..start();
+      String? finalPath;
+      int? expectedSize;
+      try {
+        final result = await _runYtDlpWithProgress(
+          ytExe: yt,
+          args: args,
+          onPercent: (pct) => _updateOverall(pct),
+          onStderr: (line) => _setStatus('[$humanIdx/$total] $line'),
+          onFinalPath: (p) => finalPath = p,
+          onExpectedSizeBytes: (b) => expectedSize = b,
+        );
+
+        if (result != 0) {
+          _setStatus(
+            '[$humanIdx/$total] yt-dlp exited with code $result — skipping',
+          );
+          continue;
+        }
+      } catch (e) {
+        _setStatus('[$humanIdx/$total] Download failed: $e — skipping');
+        continue;
+      } finally {
+        sw.stop();
+      }
+
+      if (finalPath == null) {
+        _setStatus(
+          '[$humanIdx/$total] Could not resolve final MP3 path — skipping',
+        );
+        continue;
+      }
+
+      // 4c) Determine duration (ffprobe if available), file size, then create Audio
+      if (finalPath == null) {
+        _setStatus(
+          '[$humanIdx/$total] Could not resolve final MP3 path — skipping',
+        );
+        continue;
+      }
+
+      final Duration duration = (ffprobe != null && ffprobe.isNotEmpty)
+          ? (await _probeDuration(
+              ffprobe,
+              finalPath!,
+            ).catchError((_) => Duration.zero))
+          : Duration.zero;
+
+      final fileSize = await File(finalPath!).length();
+
+      // --- 4d) Create Audio and append into playlist lists ---
+      final audio = Audio(
+        youtubeVideoChannel: meta.uploader ?? '',
+        enclosingPlaylist: _loadedPlaylist!,
+        originalVideoTitle: meta.title,
+        compactVideoDescription: _compactDescription(
+          meta.description ?? '',
+          meta.uploader ?? '',
+        ),
+        videoUrl: videoUrl,
+        audioDownloadDateTime: DateTime.now(),
+        videoUploadDate: meta.uploadDate ?? DateTime(1, 1, 1),
+        audioDuration: duration,
+        audioPlaySpeed: defaultPlaySpeed,
+      );
+      audio.fileSize = fileSize;
+      audio.downloadDuration = sw.elapsed;
+
+      _loadedPlaylist!.addDownloadedAudio(audio);
+
+      // --- 4e) Persist playlist JSON (use the file you picked) ---
+      try {
+        JsonDataService.saveToFile(
+          model: _loadedPlaylist!,
+          path: _pickedPlaylistJson!, // same file selected in UI
+        );
+      } catch (e) {
+        _setStatus('[$humanIdx/$total] JSON save warning: $e');
+      }
+
+      // For the UI footer
+      _lastOutputPath = finalPath;
+      _updateOverall(1.0);
+      _setStatus('[$humanIdx/$total] Added: ${audio.validVideoTitle}');
+    }
+
+    _busy = false;
+    _progress = 1.0;
+    _setStatus('Playlist download completed.');
+    notifyListeners();
+  }
+
+  // ---- helpers -------------------------------------------------------------
+
+  Future<List<_FlatEntry>> _listFlatPlaylistEntries(
+    String yt,
+    String playlistUrl,
+  ) async {
+    final args = <String>[
+      '--dump-single-json', // JSON only (playlist object with entries[])
+      '--flat-playlist', // “url” entries (fast, no per-video probe)
+      '--no-progress',
+      '--no-warnings',
+      '--encoding', 'utf-8', // ask yt-dlp to re-encode text to UTF-8
+      playlistUrl,
+    ];
+
+    final proc = await Process.start(
+      yt,
+      args,
+      runInShell: false, // ✅ prevents cmd.exe interpreting &
+      environment: {'PYTHONIOENCODING': 'utf-8'},
+    );
+
+    // Buffer raw bytes; do not decode per-line.
+    final outBytes = <int>[];
+    final errBytes = <int>[];
+    final outSub = proc.stdout.listen(outBytes.addAll);
+    final errSub = proc.stderr.listen(errBytes.addAll);
+    final code = await proc.exitCode;
+    await outSub.cancel();
+    await errSub.cancel();
+
+    final out = _bestEffortDecode(outBytes);
+    if (code != 0) {
+      final err = _bestEffortDecode(errBytes);
+      throw 'yt-dlp failed ($code): ${err.isEmpty ? out : err}';
+    }
+
+    // Remove UTF-8 BOM if present.
+    final jsonText = out.startsWith('\uFEFF') ? out.substring(1) : out;
+
+    final root = jsonDecode(jsonText) as Map<String, dynamic>;
+    final entries = (root['entries'] as List<dynamic>? ?? const [])
+        .map((e) => e as Map<String, dynamic>)
+        .where((e) => e['id'] != null)
+        .map(
+          (e) => _FlatEntry(
+            id: (e['id'] as String).trim(),
+            title: (e['title'] as String? ?? '').trim(),
+          ),
+        )
+        .toList();
+
+    return entries;
+  }
+
+  Future<_VideoMeta> _readVideoMeta(String yt, String url) async {
+    final args = <String>[
+      '-J', // dump JSON for this URL
+      '--no-progress',
+      '--no-warnings',
+      '--encoding', 'utf-8',
+      url,
+    ];
+
+    final proc = await Process.start(
+      yt,
+      args,
+      runInShell: false, // ✅ prevents cmd.exe interpreting &
+      environment: {'PYTHONIOENCODING': 'utf-8'},
+    );
+
+    final outBytes = <int>[];
+    final errBytes = <int>[];
+    final outSub = proc.stdout.listen(outBytes.addAll);
+    final errSub = proc.stderr.listen(errBytes.addAll);
+    final code = await proc.exitCode;
+    await outSub.cancel();
+    await errSub.cancel();
+
+    final out = _bestEffortDecode(outBytes);
+    if (code != 0) {
+      final err = _bestEffortDecode(errBytes);
+      throw 'yt-dlp -J failed ($code): ${err.isEmpty ? out : err}';
+    }
+
+    final jsonText = out.startsWith('\uFEFF') ? out.substring(1) : out;
+    final m = jsonDecode(jsonText) as Map<String, dynamic>;
+
+    return _VideoMeta(
+      id: (m['id'] as String?) ?? _extractVideoIdFromUrl(url) ?? url,
+      title: (m['title'] as String? ?? '').trim(),
+      uploader: (m['uploader'] as String? ?? m['channel'] as String?),
+      description: m['description'] as String?,
+      uploadDate: _parseUploadDate(
+        (m['upload_date'] as String?) ?? (m['modified_date'] as String?),
+      ),
+    );
+  }
+
+  DateTime? _parseUploadDate(String? raw) {
+    if (raw == null) return null;
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+
+    // Common cases first:
+    // 1) "YYYYMMDD" (e.g. "20251101")
+    final m8 = RegExp(r'^(\d{4})(\d{2})(\d{2})$').firstMatch(s);
+    if (m8 != null) {
+      final y = int.parse(m8.group(1)!);
+      final mo = int.parse(m8.group(2)!);
+      final d = int.parse(m8.group(3)!);
+      try {
+        return DateTime(y, mo, d);
+      } catch (_) {
+        /* fall through */
+      }
+    }
+
+    // 2) ISO 8601 "YYYY-MM-DD" (sometimes appears)
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(s)) {
+      try {
+        return DateTime.parse(s);
+      } catch (_) {
+        /* fall through */
+      }
+    }
+
+    // 3) "YYYYMMDDHHmmss" (rare for some extractors) → use date part
+    final m14 = RegExp(r'^(\d{4})(\d{2})(\d{2})\d{6}$').firstMatch(s);
+    if (m14 != null) {
+      final y = int.parse(m14.group(1)!);
+      final mo = int.parse(m14.group(2)!);
+      final d = int.parse(m14.group(3)!);
+      try {
+        return DateTime(y, mo, d);
+      } catch (_) {
+        /* fall through */
+      }
+    }
+
+    // 4) Fallback: let DateTime.parse try (covers full ISO strings)
+    try {
+      return DateTime.parse(s);
+    } catch (_) {}
+
+    // Unknown/unsupported format
+    return null;
+  }
+
+  String _bestEffortDecode(List<int> bytes) {
+    // Strip UTF-8 BOM if present before decode attempt
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF &&
+        bytes[1] == 0xBB &&
+        bytes[2] == 0xBF) {
+      bytes = bytes.sublist(3);
+    }
+    try {
+      return utf8.decode(bytes);
+    } catch (_) {
+      try {
+        return systemEncoding.decode(bytes); // CP-1252 on many Windows setups
+      } catch (_) {
+        return const Latin1Codec().decode(bytes, allowInvalid: true);
+      }
+    }
+  }
+
+  Future<int> _runYtDlpWithProgress({
+    required String ytExe,
+    required List<String> args,
+    required void Function(double pct) onPercent,
+    required void Function(String line) onStderr,
+    void Function(String path)? onFinalPath,
+    void Function(int bytes)? onExpectedSizeBytes,
+  }) async {
+    _proc = await Process.start(ytExe, args, runInShell: true);
+
+    final stdoutLines = _proc!.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+    final stderrLines = _proc!.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+
+    final c1 = stdoutLines.listen((line) {
+      // 1) Try to capture an explicit filename printed by --print filename
+      // (plain path, no prefix)
+      final trimmed = line.trim();
+      if (_looksLikeAPath(trimmed)) {
+        onFinalPath?.call(trimmed);
+      }
+
+      // 2) Progress from stdout
+      final m = RegExp(r'\[download\]\s+(\d+(?:\.\d+)?)%').firstMatch(line);
+      if (m != null) {
+        final pct = double.tryParse(m.group(1)!);
+        if (pct != null) onPercent(pct / 100.0);
+      }
+
+      // 3) Expected size (rarely printed to stdout, but keep it)
+      final s = RegExp(
+        r'Total file size:\s*([\d\.]+)\s*([KMG]?i?B)',
+      ).firstMatch(line);
+      if (s != null) {
+        final num = double.tryParse(s.group(1)!);
+        final unit = s.group(2)!;
+        if (num != null) onExpectedSizeBytes?.call(_toBytes(num, unit));
+      }
+    });
+
+    final c2 = stderrLines.listen((line) {
+      onStderr(line);
+
+      // 4) Also try to capture final path from stderr messages:
+      //    [ExtractAudio] Destination: C:\...\file.mp3
+      //    [Merger] Merging formats into "C:\...\file.mp3"
+      final m1 = RegExp(
+        r'\[ExtractAudio\]\s+Destination:\s(.+\.mp3)\s*$',
+      ).firstMatch(line);
+      if (m1 != null) {
+        onFinalPath?.call(m1.group(1)!.trim().replaceAll('"', ''));
+        return;
+      }
+      final m2 = RegExp(
+        r'\[Merger\]\s+Merging formats into\s+"?(.+\.mp3)"?\s*$',
+      ).firstMatch(line);
+      if (m2 != null) {
+        onFinalPath?.call(m2.group(1)!.trim().replaceAll('"', ''));
+        return;
+      }
+    });
+
+    final code = await _proc!.exitCode;
+    await c1.cancel();
+    await c2.cancel();
+    _proc = null;
+    return code;
+  }
+
+  int _toBytes(double n, String unit) {
+    switch (unit) {
+      case 'KiB':
+        return (n * 1024).round();
+      case 'MiB':
+        return (n * 1024 * 1024).round();
+      case 'GiB':
+        return (n * 1024 * 1024 * 1024).round();
+      case 'KB':
+        return (n * 1000).round();
+      case 'MB':
+        return (n * 1000 * 1000).round();
+      case 'GB':
+        return (n * 1000 * 1000 * 1000).round();
+      default:
+        return n.round();
+    }
+  }
+
+  Future<Duration> _probeDuration(String ffprobeExe, String filePath) async {
+    // ffprobe -v error -show_entries format=duration -of json "file"
+    final proc = await Process.start(ffprobeExe, [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'json',
+      filePath,
+    ], runInShell: true);
+    final out = await proc.stdout.transform(utf8.decoder).join();
+    await proc.stderr.drain();
+    final code = await proc.exitCode;
+    if (code != 0) return Duration.zero;
+    final m = jsonDecode(out) as Map<String, dynamic>;
+    final fmt = (m['format'] ?? {}) as Map<String, dynamic>;
+    final durStr = (fmt['duration'] ?? '').toString();
+    final secs = double.tryParse(durStr) ?? 0.0;
+    return Duration(milliseconds: (secs * 1000).round());
+  }
+
+  String? _extractVideoIdFromUrl(String url) {
+    final u = Uri.tryParse(url);
+    if (u == null) return null;
+    final v = u.queryParameters['v'];
+    if (v != null && v.isNotEmpty) return v;
+    // also handle youtu.be/<id>
+    final segs = u.pathSegments;
+    if (u.host.contains('youtu.be') && segs.isNotEmpty) return segs.last;
+    return null;
+  }
+
+  String _compactDescription(String description, String author) {
+    final lines = description.split('\n');
+    final first3 = lines.take(3).join('\n');
+    return (first3.trim().isEmpty) ? author : '$author\n\n$first3 ...';
   }
 
   // ---------- Helpers ----------
