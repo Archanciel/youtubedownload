@@ -299,7 +299,8 @@ class HomePage extends StatelessWidget {
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Saved to: ${dl.lastOutputPath!}',
+                  maxLines: 3,
+                  "Saved ${dl.lastOutputPath!}",
                   overflow: TextOverflow.ellipsis,
                 ),
               ),

@@ -54,6 +54,9 @@ class DownloadVM extends ChangeNotifier {
   String? _lastOutputPath;
   String? get lastOutputPath => _lastOutputPath;
 
+  int _totalAudioToDownload = 0;
+  int get totalAudioToDownload => _totalAudioToDownload;
+
   // For your playlist workflow (JSON selection + “missing only” download)
   String? _pickedPlaylistJson;
   String? get pickedPlaylistJson => _pickedPlaylistJson;
@@ -301,7 +304,7 @@ class DownloadVM extends ChangeNotifier {
     }
 
     // Progress: item index + per-item progress
-    final total = missing.length;
+    _totalAudioToDownload = missing.length;
     final vbr = settings.qualityVbr; // "0".."9"
     final defaultPlaySpeed = settings.defaultPlaySpeed; // double
 
@@ -310,7 +313,7 @@ class DownloadVM extends ChangeNotifier {
     final AudioPlayer audioPlayer = AudioPlayer();
 
     // 4) Process missing items one by one
-    for (int i = 0; i < total; i++) {
+    for (int i = 0; i < _totalAudioToDownload; i++) {
       final item = missing[i];
       final videoUrl = 'https://www.youtube.com/watch?v=${item.id}';
       final humanIdx = i + 1;
@@ -319,11 +322,11 @@ class DownloadVM extends ChangeNotifier {
       double perItemProgress = 0.0;
       void updateOverall(double currentPct) {
         perItemProgress = currentPct.clamp(0.0, 1.0);
-        _progress = ((i) + perItemProgress) / total;
+        _progress = ((i) + perItemProgress) / _totalAudioToDownload;
         notifyListeners();
       }
 
-      _setStatus('[$humanIdx/$total] Fetching metadata…');
+      _setStatus('[$humanIdx/$_totalAudioToDownload] Fetching metadata…');
       notifyListeners();
 
       // ---- 4a) metadata
@@ -331,7 +334,7 @@ class DownloadVM extends ChangeNotifier {
       try {
         meta = await _readVideoMeta(yt, videoUrl);
       } catch (e) {
-        _setStatus('[$humanIdx/$total] Metadata failed: $e — skipping');
+        _setStatus('[$humanIdx/$_totalAudioToDownload] Metadata failed: $e — skipping');
         continue;
       }
 
@@ -361,7 +364,7 @@ class DownloadVM extends ChangeNotifier {
       final String targetMp3Path = audio.filePathName;
 
       // ---- 4c) Download with yt-dlp to the EXACT target path
-      _setStatus('[$humanIdx/$total] Downloading “${audio.validVideoTitle}”…');
+      _setStatus('[$humanIdx/$_totalAudioToDownload] Downloading “${audio.validVideoTitle}”…');
 
       // IMPORTANT: no template, no --print; give the absolute file path.
       final args = <String>[
@@ -381,19 +384,19 @@ class DownloadVM extends ChangeNotifier {
           ytExe: yt,
           args: args,
           onPercent: (pct) => updateOverall(pct),
-          onStderr: (line) => _setStatus('[$humanIdx/$total] $line'),
+          onStderr: (line) => _setStatus('[$humanIdx/$_totalAudioToDownload] $line'),
           // We do NOT need onFinalPath anymore.
           // We know exactly where the file is: targetMp3Path.
         );
 
         if (result != 0) {
           _setStatus(
-            '[$humanIdx/$total] yt-dlp exited with code $result — skipping',
+            '[$humanIdx/$_totalAudioToDownload] yt-dlp exited with code $result — skipping',
           );
           continue;
         }
       } catch (e) {
-        _setStatus('[$humanIdx/$total] Download failed: $e — skipping');
+        _setStatus('[$humanIdx/$_totalAudioToDownload] Download failed: $e — skipping');
         continue;
       } finally {
         sw.stop();
@@ -419,20 +422,20 @@ class DownloadVM extends ChangeNotifier {
           path: _pickedPlaylistJson!, // same playlist JSON selected by the user
         );
       } catch (e) {
-        _setStatus('[$humanIdx/$total] JSON save warning: $e');
+        _setStatus('[$humanIdx/$_totalAudioToDownload] JSON save warning: $e');
       }
 
       // UI footer and progress polish
       _lastOutputPath = targetMp3Path;
       updateOverall(1.0);
-      _setStatus('[$humanIdx/$total] Added: ${audio.validVideoTitle}');
+      _setStatus('[$humanIdx/$_totalAudioToDownload] Added: ${audio.validVideoTitle}');
     }
 
     audioPlayer.dispose();
 
     _busy = false;
     _progress = 1.0;
-    _setStatus('Playlist download completed.');
+    _setStatus('Playlist download completed: $_totalAudioToDownload audio(s) added.');
     notifyListeners();
   }
 
